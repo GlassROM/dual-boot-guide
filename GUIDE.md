@@ -517,13 +517,49 @@ Use one-time boot selection where possible.
 
 ---
 
-## 16. Hardware clock
+## 16. Hardware clock: use UTC
 
-Dual boot can expose disagreement about the hardware clock.
+Windows and Linux often disagree about how the motherboard hardware clock should be interpreted.
 
-Linux systems commonly prefer the RTC to store UTC. Windows deployments have historically treated the RTC as local time unless explicitly configured otherwise.
+Linux normally expects the hardware clock, also called the RTC, to store UTC. Windows traditionally treats the hardware clock as local time. In a dual-boot system, this can make the clock jump forward or backward after switching operating systems.
 
-Keep this issue separate from the boot-integrity design. If the clock changes after switching operating systems, decide on one RTC policy and apply it consistently. Do not treat clock drift as evidence of bootloader failure.
+Use UTC for the hardware clock.
+
+On Linux, verify that the RTC is not in local-time mode:
+
+```bash id="rgh392"
+timedatectl
+```
+
+Desired state:
+
+```text id="pf5dwp"
+RTC in local TZ: no
+```
+
+If needed, set Linux to use UTC for the RTC:
+
+```bash id="04d0x9"
+sudo timedatectl set-local-rtc 0
+```
+
+On Windows, configure Windows to treat the hardware clock as UTC:
+
+```cmd id="z5mofm"
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\TimeZoneInformation" ^
+  /v RealTimeIsUniversal ^
+  /t REG_DWORD ^
+  /d 1 ^
+  /f
+```
+
+Then reboot Windows.
+
+If the clock still drifts after switching operating systems, resync time in Windows:
+
+```cmd id="91awuu"
+w32tm /resync /force
+```
 
 ---
 
@@ -1245,3 +1281,9 @@ https://learn.microsoft.com/en-us/windows-server/administration/windows-commands
 
 [23] Microsoft Learn, create partition EFI.  
 https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/create-partition-efi
+
+[24] systemd timedatectl manual.
+https://www.freedesktop.org/software/systemd/man/latest/timedatectl.html
+
+[25] Microsoft Learn, w32tm.
+https://learn.microsoft.com/en-us/windows-server/networking/windows-time-service/windows-time-service-tools-and-settings
