@@ -390,11 +390,13 @@ If Secure Boot is enabled, the fallback path should point to the first trusted c
 ```text id="dpk0nl"
 Secure Boot with shim:
   \EFI\BOOT\BOOTX64.EFI      ← shim
-  \EFI\Linux\<signed-UKI>.efi
+  \EFI\BOOT\<shim-recognized-loader-name>.efi ← signed UKI or UKI launcher
 
 Secure Boot without shim, where supported:
   \EFI\BOOT\BOOTX64.EFI      ← signed UKI
 ```
+
+For the shim path, the second-stage filename and location are distribution-dependent. Some shim builds expect a conventional adjacent filename such as `grubx64.efi`, even when the file being loaded is not GRUB. Use the filename and path that the selected distribution’s shim is built or configured to load.
 
 Second choice: use systemd-boot to select signed UKIs.
 
@@ -435,13 +437,13 @@ bootctl --esp-path=/efi --no-variables install
 
 Check the installed `bootctl --help` output before running the command. Current upstream `bootctl` documents `--variables=yes|no` as the option controlling whether firmware boot-loader variables are touched. Older releases document `--no-variables`. [13]
 
-Last choice: use GRUB.
+Use GRUB when the boot layout requires GRUB.
 
 ```text id="kq6ol7"
 Firmware or shim → GRUB → Linux
 ```
 
-Use GRUB when the setup requires it:
+GRUB is appropriate when:
 
 ```text id="djslkh"
 distribution expects GRUB
