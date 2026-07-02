@@ -4,6 +4,8 @@
 
 This material is provided for informational and educational purposes only. It is not legal, security, compliance, enterprise deployment, or incident-response advice.
 
+No warranty is provided. Use this material at your own risk. The author is not liable for data loss, boot failure, recovery-key lockout, firmware misconfiguration, security weakening, downtime, hardware issues, or any other damage or loss arising from use of this material.
+
 Product names, project names, company names, logos, and trademarks mentioned in this article belong to their respective owners.
 
 This article is independent. It is not affiliated with, sponsored by, approved by, or endorsed by any operating-system vendor, Linux distribution, bootloader project, firmware vendor, hardware vendor, standards body, or software publisher mentioned.
@@ -56,7 +58,9 @@ UEFI firmware has a boot manager that uses boot variables such as `BootOrder` an
 
 Use separate physical disks whenever possible.
 
-```text id="ayhgez"
+The conservative layout is:
+
+```text id="e21n2c"
 Disk 0: Windows disk
   EFI System Partition
   Microsoft Reserved Partition
@@ -65,11 +69,32 @@ Disk 0: Windows disk
 
 Disk 1: Linux disk
   EFI System Partition
-  Linux root partition
-  optional /home or swap
+  optional whole-device or whole-LVM-device encryption, if confidentiality requires it
+  LVM physical volume
+    logical volume: root
+    optional logical volume: home
+    optional logical volume: swap
+    optional logical volumes for data, snapshots, or future Linux installations
 ```
 
-Each operating system should own its own EFI System Partition.
+Each operating system owns its own EFI System Partition.
+
+The Linux ESP remains a normal firmware-readable FAT32 EFI System Partition. Do not place the ESP inside LVM.
+
+Use LVM for the Linux system unless the selected distribution has a deliberate alternative layout. LVM makes later partition management easier because root, `/home`, swap, data volumes, and future Linux installations can be resized or separated without repartitioning the whole disk.
+
+If Linux data confidentiality is required, the Linux LVM device may be encrypted as a whole. In that layout, the normal structure is:
+
+```text id="vrs053"
+Linux disk:
+  EFI System Partition
+  encrypted container
+    LVM physical volume
+      logical volume: root
+      optional logical volume: home
+      optional logical volume: swap
+      optional logical volumes for data, snapshots, or future Linux installations
+```
 
 Do not share the Windows ESP with Linux unless both boot paths can be repaired manually.
 
@@ -78,6 +103,52 @@ Do not make GRUB, systemd-boot, rEFInd, shim, or another Linux-side bootloader r
 Windows should remain the default boot target. Linux should be selected when needed through the firmware one-time boot menu, firmware disk selector, or Windows Recovery’s device boot path.
 
 Microsoft’s UEFI/GPT partition guidance describes the EFI System Partition as the system partition used for boot, formatted FAT32, managed by the operating system, and not intended to contain other files. [3]
+
+---
+
+## 2A. Linux encryption, boot integrity, and sensitive initramfs contents
+
+Linux disk encryption and Linux boot integrity solve different problems.
+
+Use disk encryption when the requirement is data confidentiality at rest. The Linux LVM device may be encrypted as a whole, with LVM placed inside the encrypted container:
+
+```text id="6hs1g7"
+Linux disk:
+  EFI System Partition
+  encrypted container
+    LVM physical volume
+      logical volume: root
+      optional logical volume: home
+      optional logical volume: swap
+      optional logical volumes for data, snapshots, or future Linux installations
+```
+
+Do not use an encrypted `/boot` partition as the default answer to sensitive boot artifacts on modern UEFI systems.
+
+For boot-artifact integrity, rely on a validated Secure Boot chain. Firmware should validate the first trusted Linux boot component. The Linux boot chain should then validate the next components it loads, according to the selected distribution’s Secure Boot model.
+
+If the initramfs contains sensitive host material, address that directly. Valid approaches include:
+
+```text id="de1f5e"
+TPM-bound sealing for secrets required during early boot
+hardware-backed encryption where the platform provides it
+host-specific credential design that avoids placing reusable system secrets in the initramfs
+a dedicated passwd/shadow arrangement where the booted host does not reuse the same sensitive credential material
+```
+
+For LUKS2 TPM-bound unlock workflows, systemd-cryptenroll is one available tool for enrolling TPM2 tokens. Use the selected distribution’s documented recovery and key-enrollment procedure before relying on TPM-bound unlocks. [28]
+
+Do not treat ordinary dm-crypt encryption as boot-artifact tamper protection. The Linux kernel documents dm-crypt as transparent block-device encryption. Authenticated disk encryption requires integrity metadata supplied by an integrity layer such as dm-integrity, or an authenticated mode configured with the required integrity support. The kernel dm-integrity documentation states that dm-crypt with dm-integrity can provide authenticated disk encryption where modified encrypted sectors produce an I/O error rather than unauthenticated decrypted data. [26][27]
+
+Operational rule:
+
+```text id="p5x3qw"
+Use Secure Boot validation for boot-chain integrity.
+Use disk encryption for Linux data confidentiality.
+Use TPM-bound or hardware-backed protection for early-boot secrets.
+Use dm-integrity or equivalent authenticated storage design only when ciphertext modification detection is required.
+Do not rely on encrypted /boot as the default integrity model.
+```
 
 ---
 
@@ -109,25 +180,25 @@ The design reduces cross-OS boot coupling.
 
 UEFI systems commonly boot through firmware boot entries stored in NVRAM. Those entries point to EFI executables such as:
 
-```text id="bmy1am"
+```text id="3u8pdo"
 \EFI\Microsoft\Boot\bootmgfw.efi
 \EFI\systemd\systemd-bootx64.efi
 \EFI\GRUB\grubx64.efi
 ```
 
-On x86_64 systems, the fallback filename is:
+On x86_64 systems, the standard fallback filename is:
 
-```text id="lqsacu"
+```text id="lhskxd"
 \EFI\BOOT\BOOTX64.EFI
 ```
 
-UEFI defines the `\EFI\BOOT\BOOT{machine type short name}.EFI` pattern. For removable media, UEFI specifies one UEFI-compliant system partition and one executable EFI image per supported processor architecture in the `BOOT` directory. [2]
+UEFI defines the `\EFI\BOOT\BOOT{machine type short name}.EFI` fallback pattern in its boot-manager behavior. For removable media, UEFI also specifies one UEFI-compliant system partition and one executable EFI image per supported processor architecture in the `BOOT` directory. [1][2]
 
-Many systems also honor this fallback path when a physical internal disk is selected from a firmware boot menu. Fixed-disk behavior remains firmware-dependent.
+Many systems also honor this fallback path when a physical internal disk is selected from a firmware boot menu. Fixed-disk behavior remains firmware-dependent unless the boot option or firmware path clearly targets the fallback loader.
 
 Use the Linux disk fallback path as a compatibility measure:
 
-```text id="l001tl"
+```text id="0sca2d"
 Linux disk ESP:
   \EFI\BOOT\BOOTX64.EFI
   plus the files required by the Linux bootloader
@@ -135,7 +206,7 @@ Linux disk ESP:
 
 A shared ESP creates a single fallback-loader filename for each architecture. Only one file can occupy this path on a single ESP:
 
-```text id="fbtj3w"
+```text id="zblpja"
 \EFI\BOOT\BOOTX64.EFI
 ```
 
@@ -293,51 +364,100 @@ Do not run them against the Windows ESP.
 
 ---
 
-## 9. systemd-boot fallback install
+## 9. UKI-first Linux boot layout
 
-For a simple UEFI Linux setup, systemd-boot is a good option.
+For a simple UEFI Linux setup, prefer a distribution-provided and distribution-signed Unified Kernel Image, also called a UKI.
 
-Current systemd releases commonly use:
+A UKI is a bootable EFI application, commonly using systemd-stub or a similar EFI stub, that contains the kernel, initramfs, kernel command line, and related boot metadata.
 
-```bash id="1e3qpq"
+Ideal path:
+
+```text id="qkl0iv"
+Firmware or shim → signed UKI → Linux
+```
+
+In this layout, the signed UKI is the boot artifact. Firmware or shim validates the UKI before Linux starts. Because the initramfs and kernel command line are embedded in the signed UKI, they are covered by the UKI signature instead of being loose files that require separate integrity handling. Red Hat documents UKI as combining the kernel, initramfs, and kernel command line into one executable binary. Debian’s UKI documentation states that UKIs embed boot contents and that those contents, including the initrd, are covered by the PE signature and verified for trust. [31][32]
+
+Direct fallback UKI layout:
+
+```text id="69zc50"
+Linux ESP:
+  \EFI\BOOT\BOOTX64.EFI      ← signed UKI
+```
+
+If Secure Boot is enabled, the fallback path should point to the first trusted component required by the selected distribution:
+
+```text id="dpk0nl"
+Secure Boot with shim:
+  \EFI\BOOT\BOOTX64.EFI      ← shim
+  \EFI\Linux\<signed-UKI>.efi
+
+Secure Boot without shim, where supported:
+  \EFI\BOOT\BOOTX64.EFI      ← signed UKI
+```
+
+Second choice: use systemd-boot to select signed UKIs.
+
+```text id="lqo9pa"
+Firmware or shim → systemd-boot → signed UKI → Linux
+```
+
+In this layout, systemd-boot is a selector. The integrity boundary remains the signed UKI.
+
+Expected components when systemd-boot is used:
+
+```text id="tolab8"
+Linux ESP:
+  \EFI\systemd\systemd-bootx64.efi           ← systemd-boot
+  \EFI\Linux\<distribution-provided-UKI>.efi ← signed UKI
+  \EFI\BOOT\BOOTX64.EFI                      ← optional fallback copy or first-stage loader
+  loader\loader.conf                         ← optional global loader configuration
+  loader\entries\*.conf                      ← optional or required depending on distribution discovery support
+```
+
+Do not assume every systemd-boot installation needs every file shown above. Some distributions rely on Boot Loader Specification discovery for UKIs; others use explicit loader entries. Follow the selected distribution’s documented layout.
+
+Use loader entries that launch signed UKIs directly. Avoid entries that reference loose kernel and initramfs files unless the selected distribution documents that layout and the boot-integrity model is understood.
+
+A split-artifact layout can still boot correctly, but it shifts responsibility to the operator. The kernel, initramfs, kernel command line, loader entries, and TPM PCR behavior must be evaluated as separate boot artifacts. If the initramfs can be modified independently, Secure Boot validation of the first EFI binary alone does not prove that the initramfs is the expected one.
+
+Current upstream systemd releases use:
+
+```bash id="8gw9c9"
 bootctl --esp-path=/efi --variables=no install
 ```
 
 Older releases may use:
 
-```bash id="ayyvry"
+```bash id="mwqxjl"
 bootctl --esp-path=/efi --no-variables install
 ```
 
-Check the installed `bootctl` help before running the command. Current `bootctl` documents `--variables=yes|no` as the option controlling whether firmware boot-loader variables are touched. [13]
+Check the installed `bootctl --help` output before running the command. Current upstream `bootctl` documents `--variables=yes|no` as the option controlling whether firmware boot-loader variables are touched. Older releases document `--no-variables`. [13]
 
-Expected layout:
+Last choice: use GRUB.
 
-```text id="3qr44q"
-Linux ESP:
-  \EFI\BOOT\BOOTX64.EFI
-  \EFI\systemd\systemd-bootx64.efi
-  loader\loader.conf
-  loader\entries\*.conf
+```text id="kq6ol7"
+Firmware or shim → GRUB → Linux
 ```
 
-Use systemd-boot when the setup is simple:
+Use GRUB when the setup requires it:
 
-```text id="c1z1bk"
-UEFI-only boot
-simple partitioning
-kernel/initramfs available from the ESP or boot partition
-no complex GRUB module requirements
-```
-
-Use GRUB when the setup is more complex:
-
-```text id="70nlha"
-encrypted boot arrangements
-Btrfs snapshot booting
-LVM or RAID layouts
+```text id="djslkh"
 distribution expects GRUB
+Btrfs snapshot booting requires GRUB integration
+LVM, RAID, or boot layout requires GRUB support
 GRUB scripting or modules are required
+distribution does not provide a suitable signed UKI path
+systemd-boot cannot launch the desired boot artifacts cleanly
+```
+
+Operational preference order:
+
+```text id="zcue6n"
+1. Firmware or shim loads a signed UKI directly.
+2. systemd-boot selects and launches signed UKIs.
+3. GRUB is used when the distribution or storage layout requires it.
 ```
 
 ---
@@ -527,25 +647,25 @@ Use UTC for the hardware clock.
 
 On Linux, verify that the RTC is not in local-time mode:
 
-```bash id="rgh392"
+```bash id="5jusl3"
 timedatectl
 ```
 
 Desired state:
 
-```text id="pf5dwp"
+```text id="r7nger"
 RTC in local TZ: no
 ```
 
 If needed, set Linux to use UTC for the RTC:
 
-```bash id="04d0x9"
+```bash id="ydd5mb"
 sudo timedatectl set-local-rtc 0
 ```
 
 On Windows, configure Windows to treat the hardware clock as UTC:
 
-```cmd id="z5mofm"
+```cmd id="cy3y8t"
 reg add "HKLM\SYSTEM\CurrentControlSet\Control\TimeZoneInformation" ^
   /v RealTimeIsUniversal ^
   /t REG_DWORD ^
@@ -557,8 +677,14 @@ Then reboot Windows.
 
 If the clock still drifts after switching operating systems, resync time in Windows:
 
-```cmd id="91awuu"
-w32tm /resync /force
+```cmd id="higz8u"
+w32tm /resync
+```
+
+If Windows should rediscover its configured time source first:
+
+```cmd id="eblkdj"
+w32tm /resync /rediscover
 ```
 
 ---
@@ -660,54 +786,103 @@ If the Linux ESP was formatted, deleted, or overwritten, boot Linux recovery med
 
 ## 19. Windows install media from Linux
 
+If a working Windows machine is available, use Microsoft’s Media Creation Tool first. Microsoft documents the Media Creation Tool as the normal path for creating Windows installation media on a USB flash drive. [33]
+
+This section is primarily for Linux-authored Windows installation media, especially when the Windows ISO contains an `install.wim` or `install.esd` that cannot be placed on a single FAT32 partition.
+
 Use a two-partition GPT USB layout when the Windows image exceeds FAT32 limits.
 
 Recommended layout:
 
-```text id="j02ult"
+```text id="r7s441"
 Partition 1: FAT32
   GPT type: Microsoft Basic Data preferred
   fallback GPT type: EFI System Partition if firmware refuses to boot
-  contents: UEFI boot files and Windows setup boot environment
+  size: small; large enough for the Windows installation files except install.wim or install.esd
+  contents: Windows installation media copied without \sources\install.wim or \sources\install.esd
 
 Partition 2: exFAT preferred, NTFS acceptable
   GPT type: Microsoft Basic Data
-  contents: full Windows ISO contents, including large install.wim or install.esd
+  contents: full Windows installation media, including \sources\install.wim or \sources\install.esd
 ```
 
 The file system and the GPT partition type are separate requirements.
 
 The boot partition must be firmware-readable. Use FAT32. Start with Microsoft Basic Data for the first partition because it is easier to reuse, format, and manage from Windows after installation. If the target firmware refuses to boot the USB, change the first partition’s GPT type to EFI System Partition and retest.
 
+Do not put the full Windows image file on the FAT32 partition when it exceeds FAT32 limits.
+
+The FAT32 partition should contain the Windows setup boot environment and installer files, but not the main Windows image payload:
+
+```text id="qjrl01"
+Copy to Partition 1:
+  all files and directories from the Windows installation media
+  except:
+    \sources\install.wim
+    \sources\install.esd
+```
+
+Preserve the original directory structure.
+
+The second partition should contain the complete Windows installation media:
+
+```text id="6wtwgz"
+Copy to Partition 2:
+  all files and directories from the Windows installation media
+  including:
+    \sources\install.wim
+    or
+    \sources\install.esd
+```
+
+Size the FAT32 partition from the actual source media. Measure the Windows installation media after excluding the main image file:
+
+```text id="9prb0e"
+Windows installation media
+minus \sources\install.wim
+minus \sources\install.esd
+plus free space for alignment and small servicing variation
+```
+
+Use a small FAT32 partition. Do not allocate a large 32 GB FAT32 partition by default. A practical rule is:
+
+```text id="fkwdxh"
+FAT32 partition size =
+  size of the installer files excluding install.wim/install.esd
+  + 512 MiB to 1 GiB slack
+```
+
+Keep the FAT32 partition below 32 GB. If the remaining installer files do not fit comfortably below that limit, the source media is unusual and should be rebuilt or handled with a different deployment procedure.
+
 The image partition must be Windows-readable after WinPE or Windows Setup starts. Use Microsoft Basic Data as the GPT type. Do not leave the image partition marked as Linux filesystem. Windows may refuse to mount, auto-assign, or surface an exFAT partition correctly if the partition type identifies it as Linux data rather than Microsoft Basic Data.
 
-Use exFAT for the second partition when creating the USB from Linux. exFAT supports large files and is usually the lower-friction cross-platform data partition for Linux-authored removable media. Use NTFS when the Linux environment has known-good NTFS write support or when following Microsoft’s WinPE deployment model. Microsoft’s WinPE USB example uses FAT32 for the boot partition and NTFS for the image partition. [15]
+Use exFAT for the second partition when creating the USB from Linux. exFAT supports large files and is usually the lower-friction cross-platform data partition for Linux-authored removable media. Use NTFS only when the Linux environment has known-good NTFS write support or when following Microsoft’s WinPE deployment model. Microsoft’s WinPE USB example uses FAT32 for the boot partition and NTFS for the image partition. [15]
 
 Acceptable variants:
 
-```text id="gn286w"
+```text id="0jf4oe"
 FAT32 Microsoft Basic Data + exFAT Microsoft Basic Data
 FAT32 Microsoft Basic Data + NTFS Microsoft Basic Data
 FAT32 ESP + exFAT Microsoft Basic Data
 FAT32 ESP + NTFS Microsoft Basic Data
-FAT32-only USB + split-WIM files
+FAT32-only USB + split-WIM files, documented by Microsoft but outside this guide
 ```
 
 Preferred Linux-authored layout:
 
-```text id="zwpen2"
+```text id="p8854u"
 FAT32 Microsoft Basic Data + exFAT Microsoft Basic Data
 ```
 
 Firmware fallback layout:
 
-```text id="42c5fl"
+```text id="vfwvkw"
 FAT32 ESP + exFAT Microsoft Basic Data
 ```
 
 Example Linux `sgdisk` type codes:
 
-```bash id="uikune"
+```bash id="z5qyao"
 # Partition 1: Microsoft Basic Data
 sgdisk --typecode=1:0700 /dev/sdX
 
@@ -717,7 +892,7 @@ sgdisk --typecode=2:0700 /dev/sdX
 
 If the firmware refuses to boot the USB, change partition 1 to EFI System Partition:
 
-```bash id="vzr8y4"
+```bash id="fdcu1o"
 sgdisk --typecode=1:EF00 /dev/sdX
 ```
 
@@ -725,21 +900,25 @@ Do not use Linux filesystem type code `8300` for either Windows setup partition.
 
 Example `parted` intent with Microsoft Basic Data first:
 
-```bash id="vpvbdr"
+```bash id="pbrf1t"
 parted /dev/sdX --script mklabel gpt
-parted /dev/sdX --script mkpart WINBOOT fat32 1MiB 1025MiB
-parted /dev/sdX --script mkpart WINSETUP 1025MiB 100%
+parted /dev/sdX --script mkpart WINBOOT fat32 1MiB 2049MiB
+parted /dev/sdX --script mkpart WINSETUP 2049MiB 100%
 ```
+
+The `2049MiB` boundary is an example only. Adjust it to the measured size of the Windows installation files excluding `install.wim` or `install.esd`, plus slack.
 
 Then verify both partitions are Microsoft Basic Data. Some Linux tools default new data partitions to Linux filesystem unless told otherwise.
 
 If firmware refuses to boot the FAT32 Microsoft Basic Data partition, set the ESP flag on partition 1 and retest:
 
-```bash id="ms7byb"
+```bash id="efeeco"
 parted /dev/sdX --script set 1 esp on
 ```
 
-Microsoft documents split-WIM deployment for FAT32-only media. The two-partition method avoids modifying the Windows image, but the target firmware and Windows recovery environment still need to be tested before erasing the destination disk. [16]
+Microsoft documents split-WIM deployment for FAT32-only media. That method is intentionally out of scope for this guide. Splitting, exporting, rebuilding, or modifying `install.wim` or `install.esd` adds deployment tooling and can create Windows Setup failures if the image is handled incorrectly.
+
+This guide uses the two-partition method so the Windows image remains intact. Test the target firmware and Windows recovery environment before erasing the destination disk. [16]
 
 ---
 
@@ -747,23 +926,23 @@ Microsoft documents split-WIM deployment for FAT32-only media. The two-partition
 
 Some USB devices present themselves as fixed drives rather than removable drives.
 
-If Windows Setup or Windows boot servicing treats the installation media as a fixed drive and the media contains an EFI System Partition, Windows may place boot files on the USB media’s ESP instead of creating or using the intended ESP on the internal Windows disk.
+If Windows Setup or Windows boot servicing treats the installation media as a fixed drive and the media contains an EFI System Partition, a conservative procedure should assume that Windows may select that visible ESP during installation or repair instead of creating or using the intended ESP on the internal Windows disk.
 
 Risk condition:
 
-```text id="g23le8"
+```text id="bhu2u6"
 Windows install USB presents as fixed disk.
 USB partition 1 is marked EFI System Partition.
 Windows Setup sees that ESP during install or repair.
-Windows boot files are written to the USB ESP.
-Internal Windows disk is left without the intended independent Windows ESP.
+Windows boot files may be written to the USB ESP.
+Internal Windows disk may be left without the intended independent Windows ESP.
 ```
 
 Use Microsoft Basic Data for the USB boot partition first. Switch it to ESP only if firmware refuses to boot it as Microsoft Basic Data.
 
 If the drive presents as fixed and the firmware refuses to boot anything except an ESP, use this sequence:
 
-```text id="b6vm9o"
+```text id="aeqgxk"
 1. Mark USB partition 1 as ESP.
 2. Boot the USB.
 3. Enter the Windows recovery environment.
@@ -774,7 +953,7 @@ If the drive presents as fixed and the firmware refuses to boot anything except 
 
 From the recovery Command Prompt, identify the USB disk and delete the USB ESP:
 
-```cmd id="yjph0b"
+```cmd id="ns3dsg"
 diskpart
 list disk
 select disk X
@@ -794,22 +973,38 @@ The `delete partition override` operation is destructive. Use it only after conf
 
 ## 21. Launching Windows Setup from the recovery environment
 
-For this Linux-authored two-partition USB workflow, do not rely on the initial installer path if the goal is to control which ESP Windows Setup can see and use.
+For this Linux-authored two-partition USB workflow, do not continue through the initial installer path.
+
+The FAT32 partition is used only to boot the Windows setup environment. It intentionally does not contain the main Windows image file:
+
+```text id="t71bt8"
+\sources\install.wim
+or
+\sources\install.esd
+```
+
+If the initial installer continues from that partition, Windows Setup may fail because the required installation image is not present there.
+
+Do not proceed until setup is being launched from the second partition, which contains the complete Windows installation media.
+
+This matters because Windows Setup may modify the target disk before the failure becomes visible. It may create or alter the partition table, create setup-related partitions, or place temporary setup files on the target disk. After that state exists, do not continue trying to repair the same failed install attempt.
+
+If the initial installer path was used and setup failed after touching the target disk, restart the machine, boot the Windows setup media again, open Command Prompt, clean the intended Windows target disk with DiskPart, and restart the installation from the correct `setup.exe`.
 
 Boot the USB, then choose:
 
-```text id="9mvupv"
+```text id="58afl3"
 Repair your computer
 Troubleshoot
 Advanced options
 Command Prompt
 ```
 
-Use Command Prompt to identify drive letters.
+Use Command Prompt to identify the second partition, which contains the complete Windows installation media including `install.wim` or `install.esd`.
 
 First option:
 
-```cmd id="7jwecp"
+```cmd id="x9rmks"
 diskpart
 list volume
 exit
@@ -817,13 +1012,13 @@ exit
 
 Second option:
 
-```cmd id="ix8l2r"
+```cmd id="xme0f6"
 notepad
 ```
 
 In Notepad, use:
 
-```text id="uzx5up"
+```text id="b1c3aw"
 File → Open → This PC
 ```
 
@@ -831,11 +1026,131 @@ Look at the visible drive letters and labels. Find the partition that contains t
 
 If the source partition is `E:\`, close Notepad and run:
 
-```cmd id="38r8a5"
+```cmd id="rlwqb5"
 E:\setup.exe
 ```
 
-Microsoft’s recovery documentation describes the Windows Recovery Environment and its command-line recovery tools. [19] Microsoft’s BCDBoot documentation also uses `diskpart`, `list volume`, and drive-letter identification as part of boot-file repair workflows. [4]
+If the earlier failed setup attempt already modified the target Windows disk, clean only the intended Windows target disk before launching setup again:
+
+```cmd id="jkq381"
+diskpart
+list disk
+select disk X
+clean
+exit
+```
+
+Replace `X` with the intended internal Windows target disk.
+
+Do not clean the Linux disk.
+
+Do not clean the Windows setup USB.
+
+Do not clean any disk unless the disk number has been confirmed by size, model, and installation intent.
+
+Microsoft’s recovery documentation describes the Windows Recovery Environment and its command-line recovery tools. Microsoft’s BCDBoot documentation also uses `diskpart`, `list volume`, and drive-letter identification as part of boot-file repair workflows. [19][4]
+
+---
+
+## 21A. Encrypted hard drives and Block SID
+
+For Windows encrypted hard drives, also called eDrive or eHDD devices, use Windows Setup or a Windows deployment procedure that explicitly supports encrypted hard drive provisioning.
+
+Do not install Windows to an encrypted hard drive through a Linux partitioning workflow and then expect Windows hardware-encryption provisioning to be correct afterward.
+
+Before booting the Windows setup media, check firmware setup for a Block SID option.
+
+The firmware option name varies by vendor. Common labels include:
+
+```text id="a5y7gd"
+Disable Block SID
+Block SID
+SED Block SID Authentication
+PPI Bypass for SED Block SID Command
+Disable issuing a Block SID Authentication command
+```
+
+For this installation path, configure firmware so that the BIOS does not issue a Block SID command that prevents Windows or the deployment environment from provisioning the self-encrypting drive. NVIDIA documents firmware behavior where BIOS sends a Block SID request by default and instructs users to enable a `Disable Block Sid` feature before SED initialization. Dell documents a related firmware setting named `SED Block SID Authentication`. [36][37]
+
+On some systems this means:
+
+```text id="gpfj1b"
+Disable Block SID: enabled
+```
+
+On other systems it means:
+
+```text id="qksac0"
+SED Block SID Authentication: disabled
+```
+
+Use the motherboard or system vendor’s wording. The operational target is the same: prevent firmware from blocking authorized encrypted-drive provisioning during Windows installation.
+
+Encrypted hard drive startup-disk requirements are stricter than ordinary storage installation. The target drive must be uninitialized and security-inactive. The system must boot natively through UEFI, CSM must be disabled, and the firmware must support the EFI storage security protocol required for security commands to the drive. [29]
+
+If setup fails or the wrong installer path was used after the target disk was selected, assume the target disk may already have been modified. Reboot, return to the Windows setup recovery command prompt, clean only the intended Windows target disk, and restart the installation from the correct setup source.
+
+Do not use this encrypted-hard-drive path unless the recovery key, firmware settings, disk identity, and target disk selection have been confirmed before installation.
+
+After Windows encrypted-hard-drive provisioning is complete, return the firmware Block SID behavior to its protective state.
+
+The temporary installation state is:
+
+```text id="rx2rx3"
+Do not let firmware block the SID command needed for encrypted-drive provisioning.
+```
+
+The normal post-installation state is:
+
+```text id="6nu66l"
+Firmware should block unintended SID commands again.
+```
+
+Vendor wording varies, so verify the meaning of the setting before changing it back.
+
+Examples:
+
+```text id="5jriw1"
+If the firmware option is "Disable Block SID":
+  enable it only for provisioning
+  disable it again after provisioning
+
+If the firmware option is "SED Block SID Authentication":
+  disable it only for provisioning
+  enable it again after provisioning
+```
+
+The operational target is what matters: allow the SID command only for the installation or provisioning window, then restore the firmware setting that prevents unintended SID commands.
+
+Do not leave the provisioning state enabled longer than necessary. Firmware behavior varies. Some systems allow the change for only one boot. Some require physical confirmation on every boot. Some keep the setting persistently. A persistent provisioning state is unnecessary exposure after encryption setup is complete.
+
+On Linux, do not use `cryptsetup --hw-opal-only` as the default OPAL path for this guide.
+
+This is not a claim that hardware-only OPAL configurations are generally broken or insecure. The narrower issue is operational fit. `cryptsetup --hw-opal-only` uses OPAL without a dm-crypt software-encryption layer. Cryptsetup has documented OPAL locking-range geometry failures where a block-size discrepancy could make the configured locking range smaller than intended, leaving remaining space outside the protected range. In a hardware-only OPAL layout, there is no dm-crypt layer above it to preserve confidentiality if that class of range error occurs. [34]
+
+Cryptsetup also documents OPAL support as distinct from ordinary dm-crypt, with `--hw-opal` using OPAL plus dm-crypt and `--hw-opal-only` using OPAL without dm-crypt. It also notes that OPAL resizing is not supported. [30]
+
+If OPAL is required on Linux, use a dedicated OPAL provisioning workflow with sedutil, full-disk SED locking, and pre-boot authentication. The OPAL path should be tested before relying on the machine. Sedutil documents OPAL boot-drive use through pre-boot authentication material and setup flows. [35]
+
+```text id="6jl4px"
+confirm the drive is OPAL-capable
+test the PBA
+enable OPAL locking for the intended full-disk range
+load and test the PBA
+power off fully
+confirm the drive locks on cold boot
+confirm the PBA unlocks the drive
+confirm the operating system boots only after unlock
+document recovery and PSID reset procedure
+```
+
+Do not treat cryptsetup OPAL mode as a substitute for a sedutil PBA-based SED deployment. For ordinary Linux confidentiality, use the normal software-encryption path:
+
+```text id="lp5b2p"
+LUKS2 / dm-crypt
+optional dm-integrity when authenticated storage is required
+LVM inside the encrypted container when flexible volume management is required
+```
 
 ---
 
@@ -1057,7 +1372,9 @@ Use the policy file from the installed Windows image being booted.
 
 Do not copy an old policy file from stale install media, another machine, or an older Windows build.
 
-Do not describe this as a Linux Secure Boot repair. It is a Windows VBS rollback-protection recovery condition.
+This recovery condition applies to Windows VBS rollback protection. It does not repair the Linux Secure Boot chain, Linux shim, GRUB, systemd-boot, or Linux kernel trust state.
+
+Do not use `mokutil --set-ssp-policy` for this recovery path. This section is limited to restoring the Windows policy file expected by Windows Boot Manager on the Windows ESP. Shim-mediated SkuSiPolicy variable handling is separate and should not be used as a substitute for rebuilding or restoring the Windows boot path.
 
 ---
 
@@ -1282,8 +1599,44 @@ https://learn.microsoft.com/en-us/windows-server/administration/windows-commands
 [23] Microsoft Learn, create partition EFI.  
 https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/create-partition-efi
 
-[24] systemd timedatectl manual.
+[24] systemd timedatectl manual.  
 https://www.freedesktop.org/software/systemd/man/latest/timedatectl.html
 
-[25] Microsoft Learn, w32tm.
+[25] Microsoft Learn, w32tm.  
 https://learn.microsoft.com/en-us/windows-server/networking/windows-time-service/windows-time-service-tools-and-settings
+
+[26] Linux kernel documentation, dm-crypt.  
+https://docs.kernel.org/admin-guide/device-mapper/dm-crypt.html
+
+[27] Linux kernel documentation, dm-integrity.  
+https://docs.kernel.org/admin-guide/device-mapper/dm-integrity.html
+
+[28] systemd manual, systemd-cryptenroll.  
+https://man.archlinux.org/man/systemd-cryptenroll.1.en
+
+[29] Microsoft Learn, Encrypted hard drives.  
+https://learn.microsoft.com/en-us/windows/security/operating-system-security/data-protection/encrypted-hard-drive
+
+[30] cryptsetup manual, SED OPAL extension.  
+https://manpages.debian.org/trixie/cryptsetup-bin/cryptsetup.8.en.html
+
+[31] Red Hat Documentation, Managing kernel command-line parameters with UKI.  
+https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/10/html/managing_monitoring_and_updating_the_kernel/managing-kernel-command-line-parameters-with-uki
+
+[32] Debian Wiki, UKI.  
+https://wiki.debian.org/UKI
+
+[33] Microsoft Support, Create installation media for Windows.  
+https://support.microsoft.com/windows/create-installation-media-for-windows-99a58364-8c02-206f-aa6f-40c3b507420d
+
+[34] cryptsetup 2.7.3 release notes.  
+https://kernel.googlesource.com/pub/scm/utils/cryptsetup/cryptsetup/+/refs/heads/v2.8.x/docs/v2.7.3-ReleaseNotes
+
+[35] sedutil project documentation.  
+https://sedutil.com/
+
+[36] NVIDIA DGX Station A100 User Guide, Managing Self-Encrypting Drives.  
+https://docs.nvidia.com/dgx/dgx-station-a100-user-guide/manage-seds.html
+
+[37] Dell Support, Pre-Boot Authentication Will Not Activate Due to SED Block SID Authentication Enabled.  
+https://www.dell.com/support/kbdoc/en-in/000126083/pre-boot-authentication-will-not-activate-due-to-sed-block-sid-authentication-enabled
